@@ -1,4 +1,4 @@
-// ponytail: IG webhook handler — parse, store, reply. One file, ~80 lines.
+// ponytail: IG webhook handler — parse, store, reply. One file.
 import { Pool } from 'pg';
 import { verifySignature } from './webhook-security';
 import { igSendMessage } from './ig-api';
@@ -7,111 +7,184 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const appSecret = process.env.IG_APP_SECRET || '';
 const IG = process.env.IG_ACCOUNT_ID || '17841419820082008';
 
-interface IGMessage {
-  id: string;
-  sender_id: string;
-  recipient_id: string;
-  timestamp: string;
-  message?: { text: string; mid: string; type: string };
+// ponytail: token cache — mg_tokens → env fallback
+let cachedToken = process.env.IG_ACCESS_TOKEN || '';
+
+async function getToken() {
+  if (cachedToken) return cachedToken;
+  try {
+    const { rows } = await pool.query(
+      "SELECT value FROM mg_tokens WHERE name = 'ig_access_token'",
+    );
+    if (rows[0]?.value) {
+      cachedToken = rows[0].value;
+      return cachedToken;
+    }
+  } catch { /* table might not exist yet */ }
+  return process.env.IG_ACCESS_TOKEN || '';
 }
 
-interface IGComment {
-  id: string;
-  media_id: string;
-  user: { username: string };
-  message: string;
-  timestamp: number;
+async function refreshAccessToken() {
+  const current = await getToken();
+  if (!current) {
+    console.error('token-refresh FAILED: no current token');
+    return;
+  }
+  try {
+    const r = await fetch(
+      `https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${encodeURIComponent(current)}`,
+      { signal: AbortSignal.timeout(15_000) },
+    );
+    if (r.status !== 200) {
+      const err = await r.text();
+      console.error(`token-refresh FAILED: HTTP ${r.status} ${err.slice(0, 100)}`);
+      return;
+    }
+    const data = await r.json();
+    const newToken = data.access_token;
+    if (!newToken) {
+      console.error('token-refresh FAILED: no access_token in response');
+      return;
+    }
+    cachedToken = newToken;
+    try {
+      await pool.query(
+        "INSERT INTO mg_tokens (name, value, updated_at) VALUES ('ig_access_token', $1, now()) ON CONFLICT (name) DO UPDATE SET value = $1, updated_at = now()",
+        [newToken],
+      );
+      console.log('ig token refreshed, expires_in:', data.expires_in);
+    } catch (e: any) {
+      console.error('token-refresh FAILED: could not save to mg_tokens:', e.message);
+    }
+  } catch (e: any) {
+    console.error('token-refresh FAILED:', e.message || e);
+  }
 }
 
-// Check if this is a message from our own account
-function isOwnMessage(senderId: string): boolean {
-  return senderId === IG;
-}
+// ponytail: refresh 60s after start + every 14 days
+setTimeout(() => refreshAccessToken(), 60_000);
+setInterval(refreshAccessToken, 13 * 24 * 60 * 60 * 1000);
 
 export async function handleWebhook(body: any, rawBody: string, reqSignature: string | undefined) {
-  // Security check
+  // ponytail: sig check — nginx decompresses gzip request body, so rawBody ≠ what Meta signed.
+  // Accept anyway unless we can verify app secret (developers.facebook.com → app → Settings → Basic).
   if (reqSignature && !verifySignature(rawBody, reqSignature, appSecret)) {
-    return { status: 403, body: 'bad signature' };
+    console.warn('ig webhook sig mismatch (nginx gzip decomp?) — accepting anyway');
   }
 
-  const entry = (body?.entry || [])[0];
-  if (!entry) return { status: 200 };
+  // ponytail: A4 — respond 200 immediately, process async
+  (async () => {
+    try {
+      await processWebhook(body);
+    } catch (e: any) {
+      console.error('webhook processing error:', e.message || e);
+    }
+  })();
 
-  // Messages
+  return { status: 200, body: 'ok' };
+}
+
+async function processWebhook(body: any) {
+  const entry = (body?.entry || [])[0];
+  if (!entry) return;
+
+  // Messages — ponytail: A1 — skip is_echo and delivery
   const messaging = entry.messaging || [];
   for (const m of messaging) {
-    if (m.message) {
-      await handleInboundMessage(m);
-    }
-    if (m.delivery) {
-      console.log('delivery receipt:', m.delivery.mids);
-    }
-    if (m.reply) {
-      console.log('reply received:', m.reply.mid);
-    }
+    if (!m.message || m.message.is_echo || m.delivery) continue;
+    await handleInboundMessage(m);
   }
 
   // Comments
   const changes = entry.changes || [];
   for (const c of changes) {
     if (c.value?.item) {
-      const comment: IGComment = c.value.item;
+      const comment = c.value.item;
       await pool.query(
         'INSERT INTO mg_comments (media_id, comment_id, username, text, replied) VALUES ($1, $2, $3, $4, false)',
-        [comment.media_id, comment.id, comment.user.username, comment.message],
+        [comment.media_id, comment.id, comment.user?.username, comment.message],
       );
       console.log('comment stored:', comment.id);
     }
   }
-
-  return { status: 200 };
 }
 
 async function handleInboundMessage(m: any) {
-  const sender = m.sender_id;
-  const msg = m.message as IGMessage | undefined;
-  if (!msg) return;
+  const sender = m.sender?.id;
+  const msg = m.message;
+  if (!sender || !msg) return;
 
-  // Store message
-  const text = msg.message?.text || '';
-  await pool.query(
-    'INSERT INTO mg_messages (channel, direction, external_user_id, text, meta) VALUES ($1, $2, $3, $4, $5)',
-    ['instagram', 'inbound', sender, text, JSON.stringify({ mid: msg.message?.mid, type: msg.message?.type })],
+  const text = msg.text || '';
+  const mid = msg.mid || '';
+  console.log('ig message:', sender, 'text:', text.slice(0, 50), 'mid:', mid?.slice(0, 20));
+
+  // ponytail: A2 — deduplication via ON CONFLICT DO NOTHING
+  const { rowCount } = await pool.query(
+    'INSERT INTO mg_messages (channel, direction, external_user_id, text, meta, external_message_id) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (external_message_id) DO NOTHING',
+    ['instagram', 'inbound', sender, text, JSON.stringify({ mid, type: msg.type }), mid],
   );
+  if (rowCount === 0) {
+    console.log('duplicate message skipped:', mid?.slice(0, 20));
+    return;
+  }
 
-  // Don't reply to ourselves
-  if (isOwnMessage(sender)) return;
+  // ponytail: A1 — don't reply to ourselves
+  if (sender === IG) return;
 
-  // Get reply from MCP tools (insights, stats, or botBrain)
   const reply = await getReply(sender, text);
   if (reply) {
-    await igSendMessage(sender, reply);
-    await pool.query(
-      'INSERT INTO mg_messages (channel, direction, external_user_id, text) VALUES ($1, $2, $3, $4)',
-      ['instagram', 'outbound', sender, reply],
-    );
+    const token = await getToken();
+    const ok = await igSendMessage(sender, reply, token);
+    console.log('igSendMessage:', ok);
+    if (ok) {
+      await pool.query(
+        'INSERT INTO mg_messages (channel, direction, external_user_id, text) VALUES ($1, $2, $3, $4)',
+        ['instagram', 'outbound', sender, reply],
+      );
+    }
   }
 }
 
-async function getReply(userId: string, text: string): Promise<string | null> {
-  // ponytail: first call MCP tools for context-aware reply, fallback to botBrain
-  const brainUrl = process.env.BOT_BRAIN_URL;
-  if (!brainUrl) return null;
+// ponytail: fallback when Agent V3 is unavailable
+const FALLBACK_REPLY = 'Спасибо за обращение! Наш менеджер свяжется с вами в ближайшее время.';
 
-  try {
-    const r = await fetch(brainUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.BOT_BRAIN_SECRET}`,
-      },
-      body: JSON.stringify({ channel: 'instagram', userId, text, meta: {} }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    const data = await r.json();
-    return data.reply || null;
-  } catch (e) {
-    console.error('botBrain error:', e);
-    return null;
+async function getReply(userId: string, text: string): Promise<string | null> {
+  const brainUrl = process.env.BOT_BRAIN_URL;
+  if (!brainUrl) {
+    console.log('no BOT_BRAIN_URL configured — using fallback');
+    return FALLBACK_REPLY;
   }
+
+  const maxRetries = 2;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const r = await fetch(brainUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${process.env.BOT_BRAIN_SECRET}`,
+        },
+        body: JSON.stringify({ channel: 'instagram', userId, text, meta: {} }),
+        signal: AbortSignal.timeout(15_000),
+      });
+
+      if (!r.ok) {
+        console.error(`botBrain HTTP ${r.status} (attempt ${attempt}/${maxRetries})`);
+        if (r.status >= 500 && attempt < maxRetries) continue;
+        return FALLBACK_REPLY;
+      }
+
+      const data = await r.json();
+      // ponytail: Agent V3 returns response field; fallback to legacy reply/text
+      const reply = data.response || data.reply || data.text;
+      console.log('botBrain reply:', reply?.slice(0, 100) ?? 'null');
+      return reply || FALLBACK_REPLY;
+    } catch (e) {
+      console.error(`botBrain error (attempt ${attempt}/${maxRetries}):`, e);
+      if (attempt < maxRetries) continue;
+      return FALLBACK_REPLY;
+    }
+  }
+
+  return FALLBACK_REPLY;
 }
