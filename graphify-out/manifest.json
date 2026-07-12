@@ -1,0 +1,57 @@
+{
+  "mcp-server.py": {
+    "mtime": 1783891495.646982,
+    "ast_hash": "1d6a45659f73614f0c140fdbe5880003",
+    "semantic_hash": ""
+  },
+  "package.json": {
+    "mtime": 1783891495.6473494,
+    "ast_hash": "c9e4d9d798edfc8fac4d270fb3799b01",
+    "semantic_hash": ""
+  },
+  "src/ig-api.js": {
+    "mtime": 1783891495.647481,
+    "ast_hash": "983b96c1db8f623f5eb41e2dc31b9076",
+    "semantic_hash": ""
+  },
+  "src/ig-api.ts": {
+    "mtime": 1783892551.0734422,
+    "ast_hash": "6ba53a2f3c7d85f0b4ef024973c137e8",
+    "semantic_hash": ""
+  },
+  "src/index.ts": {
+    "mtime": 1783891877.6459556,
+    "ast_hash": "337c8469f5e574c3ee378ecc15e3e6eb",
+    "semantic_hash": ""
+  },
+  "src/test-ig-api.mjs": {
+    "mtime": 1783891495.6477036,
+    "ast_hash": "745bec1a114a0d088e2050370737ba2d",
+    "semantic_hash": ""
+  },
+  "src/types.ts": {
+    "mtime": 1783891530.6817544,
+    "ast_hash": "6dfb2e2a3fc3376c41861e280379e233",
+    "semantic_hash": ""
+  },
+  "src/webhook-handler.ts": {
+    "mtime": 1783893911.6698837,
+    "ast_hash": "112477ead98fec16f311300c2285f37d",
+    "semantic_hash": ""
+  },
+  "src/webhook-security.ts": {
+    "mtime": 1783891495.647847,
+    "ast_hash": "dbd7beee78ccd01e628d40fa17abd0f6",
+    "semantic_hash": ""
+  },
+  "tsconfig.json": {
+    "mtime": 1783891495.6479268,
+    "ast_hash": "528b60ff3d185173c844a9183d0e8b18",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1783891495.646255,
+    "ast_hash": "b294a1cfb634cfb2f17e46f6af7501dc",
+    "semantic_hash": ""
+  }
+}
