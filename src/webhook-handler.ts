@@ -198,7 +198,7 @@ async function getReply(userId: string, text: string): Promise<string | null> {
           Authorization: `Bearer ${process.env.BOT_BRAIN_SECRET}`,
         },
         body: JSON.stringify({ channel: 'instagram', external_id: userId, text, meta: {} }),
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(30_000),
       });
 
       if (!r.ok) {
