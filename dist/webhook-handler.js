@@ -79,10 +79,15 @@ async function processWebhook(body) {
     const entry = (body?.entry || [])[0];
     if (!entry)
         return;
-    // Messages — ponytail: A1 — skip is_echo and delivery
+    // Messages — ponytail: A1 — skip echo, delivery, read, and messages from our account
     const messaging = entry.messaging || [];
     for (const m of messaging) {
-        if (!m.message || m.message.is_echo || m.delivery)
+        if (!m.message || m.message.is_echo || m.delivery || m.read)
+            continue;
+        if (m.sender?.id === IG)
+            continue;
+        const text = m.message.text || '';
+        if (!text || text === '&')
             continue;
         await handleInboundMessage(m);
     }
