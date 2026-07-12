@@ -197,7 +197,7 @@ async function getReply(userId: string, text: string): Promise<string | null> {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${process.env.BOT_BRAIN_SECRET}`,
         },
-        body: JSON.stringify({ channel: 'instagram', userId, text, meta: {} }),
+        body: JSON.stringify({ channel: 'instagram', external_id: userId, text, meta: {} }),
         signal: AbortSignal.timeout(15_000),
       });
 
