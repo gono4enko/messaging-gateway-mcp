@@ -6,9 +6,12 @@ const IG = process.env.IG_ACCOUNT_ID || '17841419820082008';
 async function igSendMessage(userId, text, token) {
     const accessToken = token || process.env.IG_ACCESS_TOKEN || '';
     try {
-        const r = await fetch(`https://graph.instagram.com/v25.0/${IG}/messages?access_token=${encodeURIComponent(accessToken)}`, {
+        const r = await fetch(`https://graph.instagram.com/v25.0/${IG}/messages`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${accessToken}`,
+            },
             body: JSON.stringify({
                 recipient: { id: userId },
                 message: { text },

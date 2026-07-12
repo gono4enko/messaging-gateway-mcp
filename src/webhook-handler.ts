@@ -7,6 +7,19 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const appSecret = process.env.IG_APP_SECRET || '';
 const IG = process.env.IG_ACCOUNT_ID || '17841419820082008';
 
+// Meta limit: 1000 bytes UTF-8 per message
+const MAX_MESSAGE_BYTES = 1000;
+
+// ponytail: truncate text to 1000 bytes on UTF-8 character boundary
+function truncateUtf8(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+  const truncated = buf.subarray(0, end).toString('utf8');
+  return truncated + '…';
+}
+
 // ponytail: token cache — mg_tokens → env fallback
 let cachedToken = process.env.IG_ACCESS_TOKEN || '';
 
@@ -67,7 +80,6 @@ setInterval(refreshAccessToken, 13 * 24 * 60 * 60 * 1000);
 
 export async function handleWebhook(body: any, rawBody: string, reqSignature: string | undefined) {
   // ponytail: sig check — nginx decompresses gzip request body, so rawBody ≠ what Meta signed.
-  // Accept anyway unless we can verify app secret (developers.facebook.com → app → Settings → Basic).
   if (reqSignature && !verifySignature(rawBody, reqSignature, appSecret)) {
     console.warn('ig webhook sig mismatch (nginx gzip decomp?) — accepting anyway');
   }
@@ -82,6 +94,12 @@ export async function handleWebhook(body: any, rawBody: string, reqSignature: st
   })();
 
   return { status: 200, body: 'ok' };
+}
+
+function isWithin24h(timestamp: number): boolean {
+  const now = Date.now();
+  const age = now - timestamp;
+  return age < 24 * 60 * 60 * 1000;
 }
 
 async function processWebhook(body: any) {
@@ -119,12 +137,22 @@ async function handleInboundMessage(m: any) {
 
   const text = msg.text || '';
   const mid = msg.mid || '';
-  console.log('ig message:', sender, 'text:', text.slice(0, 50), 'mid:', mid?.slice(0, 20));
+
+  // ponytail: Meta timestamp is in milliseconds
+  const ts = m.timestamp ? parseInt(m.timestamp, 10) : Date.now();
+  const age = Date.now() - ts;
+  console.log('ig message:', sender, 'text:', text.slice(0, 50), 'mid:', mid?.slice(0, 20), 'age:', Math.round(age / 1000 / 60), 'min');
+
+  // ponytail: A3 — skip messages older than 24h (Meta will reject replies)
+  if (!isWithin24h(ts)) {
+    console.log('message outside 24h window, skipped');
+    return;
+  }
 
   // ponytail: A2 — deduplication via ON CONFLICT DO NOTHING
   const { rowCount } = await pool.query(
     'INSERT INTO mg_messages (channel, direction, external_user_id, text, meta, external_message_id) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (external_message_id) DO NOTHING',
-    ['instagram', 'inbound', sender, text, JSON.stringify({ mid, type: msg.type }), mid],
+    ['instagram', 'inbound', sender, text, JSON.stringify({ mid, type: msg.type, ts }), mid],
   );
   if (rowCount === 0) {
     console.log('duplicate message skipped:', mid?.slice(0, 20));
@@ -136,13 +164,15 @@ async function handleInboundMessage(m: any) {
 
   const reply = await getReply(sender, text);
   if (reply) {
+    const safeReply = truncateUtf8(reply, MAX_MESSAGE_BYTES);
+    console.log('reply bytes:', Buffer.byteLength(reply, 'utf8'), '→', Buffer.byteLength(safeReply, 'utf8'));
     const token = await getToken();
-    const ok = await igSendMessage(sender, reply, token);
+    const ok = await igSendMessage(sender, safeReply, token);
     console.log('igSendMessage:', ok);
     if (ok) {
       await pool.query(
         'INSERT INTO mg_messages (channel, direction, external_user_id, text) VALUES ($1, $2, $3, $4)',
-        ['instagram', 'outbound', sender, reply],
+        ['instagram', 'outbound', sender, safeReply],
       );
     }
   }
